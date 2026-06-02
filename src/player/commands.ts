@@ -4,9 +4,9 @@
 import { when } from "mobx";
 import * as vscode from "vscode";
 import { EXTENSION_NAME } from "../constants";
-import { focusPlayer } from "../player";
+import { CodeTourReviewComment, focusPlayer } from "../player";
 import { saveTour } from "../recorder/commands";
-import { CodeTour, store } from "../store";
+import { CodeTour, CodeTourStepComment, store } from "../store";
 import {
   endCurrentCodeTour,
   exportTour,
@@ -16,7 +16,7 @@ import {
   startCodeTour
 } from "../store/actions";
 import { progress } from "../store/storage";
-import { readUriContents } from "../utils";
+import { getStepLabel, readUriContents } from "../utils";
 import { CodeTourNode } from "./tree/nodes";
 
 let terminal: vscode.Terminal | null;
@@ -190,6 +190,104 @@ export function registerPlayerCommands() {
   );
 
   vscode.commands.registerCommand(`${EXTENSION_NAME}.resumeTour`, focusPlayer);
+
+  vscode.commands.registerCommand(
+    `${EXTENSION_NAME}.sendStepCommentToCopilot`,
+    async (
+      commentOrTourId?: CodeTourReviewComment | vscode.CommentThread | string,
+      stepNumber?: number,
+      commentId?: string
+    ) => {
+      const availableCommands = await vscode.commands.getCommands(true);
+      if (!availableCommands.includes("workbench.action.chat.open")) {
+        return vscode.window.showErrorMessage(
+          "Copilot Chat isn't available in this VS Code window."
+        );
+      }
+
+      let tour: CodeTour;
+      let reviewComment: CodeTourStepComment;
+      let targetStepNumber: number;
+
+      if (commentOrTourId instanceof CodeTourReviewComment) {
+        tour = commentOrTourId.tour;
+        reviewComment = commentOrTourId.reviewComment;
+        targetStepNumber = commentOrTourId.stepNumber;
+      } else if (typeof commentOrTourId === "string") {
+        if (typeof stepNumber === "undefined" || !commentId) {
+          return vscode.window.showErrorMessage(
+            "Unable to identify the CodeTour review comment to send."
+          );
+        }
+
+        const tours = [
+          store.activeTour?.tour,
+          ...(store.activeTour?.tours || []),
+          ...store.tours
+        ].filter((tour): tour is CodeTour => !!tour);
+
+        const targetTour = tours.find(tour => tour.id === commentOrTourId);
+        const targetComment = targetTour?.steps[stepNumber].comments?.find(
+          comment => comment.id === commentId
+        );
+        if (!targetTour || !targetComment) {
+          return vscode.window.showErrorMessage(
+            "Unable to find the CodeTour review comment to send."
+          );
+        }
+
+        tour = targetTour;
+        reviewComment = targetComment;
+        targetStepNumber = stepNumber;
+      } else {
+        if (!store.activeTour) {
+          return vscode.window.showErrorMessage(
+            "Start a CodeTour step before sending a review comment to Copilot Chat."
+          );
+        }
+
+        tour = store.activeTour.tour;
+        targetStepNumber = store.activeTour.step;
+        const targetComment = tour.steps[targetStepNumber].comments?.slice(-1)[0];
+        if (!targetComment) {
+          return vscode.window.showErrorMessage(
+            "This CodeTour step doesn't have any review comments to send."
+          );
+        }
+
+        reviewComment = targetComment;
+      }
+
+      const step = tour.steps[targetStepNumber];
+      const stepLabel = getStepLabel(tour, targetStepNumber);
+      const location = [
+        step.file ? `File: ${step.file}` : undefined,
+        step.directory ? `Directory: ${step.directory}` : undefined,
+        step.uri ? `URI: ${step.uri}` : undefined,
+        step.view ? `View: ${step.view}` : undefined,
+        step.line ? `Line: ${step.line}` : undefined
+      ]
+        .filter(Boolean)
+        .join("\n");
+
+      const prompt = `Please address this CodeTour review comment.
+
+Tour: ${tour.title}
+Step: ${targetStepNumber + 1} of ${tour.steps.length}
+Step label: ${stepLabel}
+${location ? `${location}\n` : ""}
+Step description:
+${step.description}
+
+Review comment:
+${reviewComment.body}`;
+
+      await vscode.commands.executeCommand("workbench.action.chat.open", {
+        query: prompt,
+        isPartialQuery: false
+      });
+    }
+  );
 
   vscode.commands.registerCommand(
     `${EXTENSION_NAME}.openTourFile`,

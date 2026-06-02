@@ -1,13 +1,13 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import { action, comparer, runInAction } from "mobx";
+import { action, comparer, runInAction, set } from "mobx";
 import * as path from "path";
 import * as vscode from "vscode";
 import { workspace } from "vscode";
 import { EXTENSION_NAME, FS_SCHEME_CONTENT } from "../constants";
 import { api, RefType } from "../git";
-import { CodeTourComment } from "../player";
+import { CodeTourComment, CodeTourReviewComment } from "../player";
 import { CodeTourNode, CodeTourStepNode } from "../player/tree/nodes";
 import { CodeTour, CodeTourStep, store } from "../store";
 import {
@@ -23,14 +23,25 @@ export async function saveTour(tour: CodeTour) {
   const uri = vscode.Uri.parse(tour.id);
   const newTour = {
     $schema: "https://aka.ms/codetour-schema",
-    ...tour
+    ...tour,
+    steps: tour.steps.map(step => {
+      const newStep = {
+        ...step,
+        comments: step.comments?.map(({ id, body, createdAt }) => ({
+          id,
+          body,
+          createdAt
+        }))
+      };
+
+      delete newStep.markerTitle;
+
+      return newStep;
+    })
   };
 
   // @ts-ignore
   delete newTour.id;
-  newTour.steps.forEach(step => {
-    delete step.markerTitle;
-  });
 
   const tourContent = JSON.stringify(newTour, null, 2);
 
@@ -449,6 +460,46 @@ export function registerRecorderCommands() {
           vscode.CommentMode.Preview
         )
       ];
+    })
+  );
+
+  vscode.commands.registerCommand(
+    `${EXTENSION_NAME}.addStepComment`,
+    action(async (reply: vscode.CommentReply) => {
+      const body = reply.text.trim();
+      if (!body) {
+        return vscode.window.showErrorMessage(
+          "Enter a comment before adding it to the tour step."
+        );
+      }
+
+      const step = store.activeTour!.tour.steps[store.activeTour!.step];
+      const thread = reply.thread;
+      const reviewComment = {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        body,
+        createdAt: new Date().toISOString()
+      };
+
+      if (!step.comments) {
+        set(step, "comments", []);
+      }
+
+      step.comments!.push(reviewComment);
+
+      await saveTour(store.activeTour!.tour);
+
+      if (store.activeTour?.thread === thread) {
+        thread.comments = [
+          ...thread.comments,
+          new CodeTourReviewComment(
+            reviewComment,
+            thread,
+            store.activeTour.tour,
+            store.activeTour.step
+          )
+        ];
+      }
     })
   );
 
