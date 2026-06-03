@@ -86,10 +86,6 @@
         "title": "Add Step to Tour"
       },
       {
-        "command": "codetour.addStepComment",
-        "title": "Add Review Comment"
-      },
-      {
         "command": "codetour.changeTourDescription",
         "title": "Change Description"
       },
@@ -278,10 +274,6 @@
           "when": "false"
         },
         {
-          "command": "codetour.addStepComment",
-          "when": "false"
-        },
-        {
           "command": "codetour.sendStepCommentToCopilot",
           "when": "false"
         },
@@ -387,18 +379,13 @@
           "when": "commentController == codetour"
         },
         {
-          "command": "codetour.sendStepCommentToCopilot",
-          "group": "inline@4",
-          "when": "commentController == codetour && commentThread =~ /hasReviewComments/"
-        },
-        {
           "command": "codetour.editTour",
-          "group": "inline@5",
+          "group": "inline@4",
           "when": "commentController == codetour && !codetour:isEditing && codetour:canEditTour"
         },
         {
           "command": "codetour.previewTour",
-          "group": "inline@5",
+          "group": "inline@4",
           "when": "commentController == codetour && codetour:isEditing && !commentThreadIsEmpty"
         }
       ],
@@ -409,17 +396,12 @@
           "when": "commentController == codetour && commentThreadIsEmpty"
         },
         {
-          "command": "codetour.addStepComment",
+          "command": "codetour.sendStepCommentToCopilot",
           "group": "inline",
           "when": "commentController == codetour && commentThread =~ /reviewable/"
         }
       ],
       "comments/comment/title": [
-        {
-          "command": "codetour.sendStepCommentToCopilot",
-          "group": "inline@1",
-          "when": "commentController == codetour && comment == codetour.reviewComment"
-        },
         {
           "command": "codetour.moveTourStepBack",
           "group": "move@1",

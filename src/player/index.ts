@@ -22,7 +22,7 @@ import {
   workspace
 } from "vscode";
 import { SMALL_ICON_URL } from "../constants";
-import { CodeTour, CodeTourStepComment, store } from "../store";
+import { CodeTour, store } from "../store";
 import { initializeStorage } from "../store/storage";
 import {
   getActiveStepMarker,
@@ -130,29 +130,6 @@ export class CodeTourComment implements Comment {
 
     this.body = new MarkdownString(body);
     this.body.isTrusted = true;
-  }
-}
-
-export class CodeTourReviewComment implements Comment {
-  public id: string;
-  public contextValue: string = "codetour.reviewComment";
-  public author: CommentAuthorInformation = {
-    name: "CodeTour Review",
-    iconPath: Uri.parse(SMALL_ICON_URL)
-  };
-  public body: string;
-  public mode: CommentMode = CommentMode.Preview;
-  public label: string;
-
-  constructor(
-    public reviewComment: CodeTourStepComment,
-    public parent: CommentThread,
-    public tour: CodeTour,
-    public stepNumber: number
-  ) {
-    this.id = reviewComment.id;
-    this.body = reviewComment.body;
-    this.label = new Date(reviewComment.createdAt).toLocaleString();
   }
 }
 
@@ -368,27 +345,13 @@ async function renderCurrentStep() {
     mode
   );
 
-  const reviewComments = (step.comments || []).map(
-    reviewComment =>
-      new CodeTourReviewComment(
-        reviewComment,
-        store.activeTour!.thread!,
-        currentTour,
-        currentStep
-      )
-  );
-
   // @ts-ignore
   store.activeTour!.thread.canReply = !store.isEditing;
-  store.activeTour!.thread.comments = [comment, ...reviewComments];
+  store.activeTour!.thread.comments = [comment];
 
   const contextValues = [];
   if (!store.isEditing) {
     contextValues.push("reviewable");
-  }
-
-  if (step.comments && step.comments.length > 0) {
-    contextValues.push("hasReviewComments");
   }
 
   if (hasPreviousStep) {
@@ -498,12 +461,7 @@ export function registerPlayerModule(context: ExtensionContext) {
               step.description,
               step.line,
               step.directory,
-              step.view,
-              step.comments?.map(comment => [
-                comment.id,
-                comment.body,
-                comment.createdAt
-              ])
+              step.view
             ])
           ]
         : null

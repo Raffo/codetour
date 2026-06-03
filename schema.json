@@ -85,29 +85,6 @@
             "type": "string",
             "description": "Description of the step."
           },
-          "comments": {
-            "type": "array",
-            "description": "Review comments associated with this step.",
-            "default": [],
-            "items": {
-              "type": "object",
-              "required": ["id", "body", "createdAt"],
-              "properties": {
-                "id": {
-                  "type": "string",
-                  "description": "Unique identifier for the comment."
-                },
-                "body": {
-                  "type": "string",
-                  "description": "Comment text."
-                },
-                "createdAt": {
-                  "type": "string",
-                  "description": "ISO timestamp for when the comment was created."
-                }
-              }
-            }
-          },
           "selection": {
             "type": "object",
             "required": ["start", "end"],

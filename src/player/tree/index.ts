@@ -40,12 +40,7 @@ class CodeTourTreeProvider implements TreeDataProvider<TreeItem>, Disposable {
               store.activeTour.tour.steps.map(step => [
                 step.title,
                 step.markerTitle,
-                step.description,
-                step.comments?.map(comment => [
-                  comment.id,
-                  comment.body,
-                  comment.createdAt
-                ])
+                step.description
               ])
             ]
           : null
