@@ -2,8 +2,10 @@
 // Licensed under the MIT License.
 
 import { when } from "mobx";
+import type { AxiosError, Method } from "axios";
 import * as vscode from "vscode";
 import { EXTENSION_NAME } from "../constants";
+import { api } from "../git";
 import { focusPlayer } from "../player";
 import { saveTour } from "../recorder/commands";
 import { CodeTour, store } from "../store";
@@ -20,6 +22,391 @@ import { getStepLabel, readUriContents } from "../utils";
 import { CodeTourNode } from "./tree/nodes";
 
 let terminal: vscode.Terminal | null;
+
+interface PullRequestTarget {
+  owner: string;
+  repo: string;
+  pullNumber: number;
+}
+
+interface PullRequestFile {
+  filename: string;
+  patch?: string;
+}
+
+interface PullRequest {
+  number: number;
+  html_url: string;
+}
+
+interface GitHubRepository {
+  owner: string;
+  repo: string;
+}
+
+interface ReviewComment {
+  path: string;
+  line: number;
+  side: "RIGHT";
+  body: string;
+}
+
+interface SkippedReviewStep {
+  stepNumber: number;
+  reason: string;
+}
+
+interface GitHubErrorResponse {
+  message?: string;
+  errors?: Array<{
+    code?: string;
+    field?: string;
+    message?: string;
+    resource?: string;
+  }>;
+}
+
+function isGitHubAxiosError(
+  error: unknown
+): error is AxiosError<GitHubErrorResponse> {
+  return typeof error === "object" && error !== null && "response" in error;
+}
+
+function getGitHubErrorMessage(error: unknown) {
+  if (isGitHubAxiosError(error)) {
+    const data = error.response?.data;
+    if (data) {
+      const details = data.errors
+        ?.map(detail =>
+          [detail.resource, detail.field, detail.code, detail.message]
+            .filter(Boolean)
+            .join(" ")
+        )
+        .filter(Boolean)
+        .join("; ");
+
+      return details && data.message
+        ? `${data.message}: ${details}`
+        : data.message || details || error.message;
+    }
+
+    return error.message;
+  }
+
+  return String(error);
+}
+
+function parsePullRequestInput(input: string): PullRequestTarget | undefined {
+  const value = input.trim();
+  const urlMatch = value.match(
+    /^https:\/\/github\.com\/([^\/]+)\/([^\/]+)\/pull\/(\d+)\/?$/
+  );
+  if (urlMatch) {
+    return {
+      owner: urlMatch[1],
+      repo: urlMatch[2],
+      pullNumber: Number(urlMatch[3])
+    };
+  }
+
+  const shorthandMatch = value.match(/^([^\/\s]+)\/([^#\/\s]+)(?:#|\/pull\/)(\d+)$/);
+  if (shorthandMatch) {
+    return {
+      owner: shorthandMatch[1],
+      repo: shorthandMatch[2],
+      pullNumber: Number(shorthandMatch[3])
+    };
+  }
+}
+
+function formatPullRequestTarget(target: PullRequestTarget) {
+  return `${target.owner}/${target.repo}#${target.pullNumber}`;
+}
+
+function parseGitHubRemoteUrl(url?: string): GitHubRepository | undefined {
+  if (!url) {
+    return;
+  }
+
+  const match = url.match(
+    /^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([^\/]+)\/(.+?)(?:\.git)?$/
+  );
+  if (!match) {
+    return;
+  }
+
+  return {
+    owner: match[1],
+    repo: match[2]
+  };
+}
+
+function getUniqueRepositories(repositories: GitHubRepository[]) {
+  const seen = new Set<string>();
+  return repositories.filter(repository => {
+    const key = `${repository.owner}/${repository.repo}`;
+    if (seen.has(key)) {
+      return false;
+    }
+
+    seen.add(key);
+    return true;
+  });
+}
+
+function getRepositoryForTour(tour: CodeTour) {
+  if (!api) {
+    return;
+  }
+
+  const tourUri = vscode.Uri.parse(tour.id);
+  const workspaceRoot =
+    vscode.workspace.getWorkspaceFolder(tourUri)?.uri ||
+    vscode.workspace.workspaceFolders?.[0]?.uri;
+
+  return workspaceRoot ? api.getRepository(workspaceRoot) : undefined;
+}
+
+async function findPullRequestsForBranch(
+  base: GitHubRepository,
+  head: GitHubRepository,
+  branch: string,
+  token: string
+) {
+  const pulls = await githubRequest<PullRequest[]>(
+    "GET",
+    `https://api.github.com/repos/${base.owner}/${base.repo}/pulls?state=open&head=${encodeURIComponent(
+      `${head.owner}:${branch}`
+    )}`,
+    token
+  );
+
+  return pulls.map(pull => ({
+    owner: base.owner,
+    repo: base.repo,
+    pullNumber: pull.number
+  }));
+}
+
+async function detectPullRequestForTour(
+  tour: CodeTour,
+  token: string
+): Promise<PullRequestTarget | undefined> {
+  const repository = getRepositoryForTour(tour);
+  const branch = repository?.state.HEAD?.name;
+  if (!repository || !branch) {
+    return;
+  }
+
+  const gitHubRepositories = getUniqueRepositories(
+    repository.state.remotes.flatMap(remote =>
+      [
+        parseGitHubRemoteUrl(remote.pushUrl),
+        parseGitHubRemoteUrl(remote.fetchUrl)
+      ].filter((repo): repo is GitHubRepository => !!repo)
+    )
+  );
+
+  if (gitHubRepositories.length === 0) {
+    return;
+  }
+
+  const targets: PullRequestTarget[] = [];
+  for (const base of gitHubRepositories) {
+    for (const head of gitHubRepositories) {
+      try {
+        targets.push(
+          ...(await findPullRequestsForBranch(base, head, branch, token))
+        );
+      } catch {
+        // Ignore inaccessible remotes during best-effort detection.
+      }
+    }
+  }
+
+  const uniqueTargets = targets.filter(
+    (target, index) =>
+      targets.findIndex(
+        item =>
+          item.owner === target.owner &&
+          item.repo === target.repo &&
+          item.pullNumber === target.pullNumber
+      ) === index
+  );
+
+  if (uniqueTargets.length === 1) {
+    return uniqueTargets[0];
+  } else if (uniqueTargets.length > 1) {
+    const response = await vscode.window.showQuickPick(
+      uniqueTargets.map(target => ({
+        label: formatPullRequestTarget(target),
+        target
+      })),
+      { placeHolder: "Select the pull request to review" }
+    );
+
+    return response?.target;
+  }
+}
+
+function getReviewLineNumbers(patch?: string): Set<number> {
+  const lines = new Set<number>();
+  if (!patch) {
+    return lines;
+  }
+
+  let newLine: number | undefined;
+  for (const line of patch.split("\n")) {
+    const hunk = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    if (hunk) {
+      newLine = Number(hunk[1]);
+      continue;
+    }
+
+    if (typeof newLine === "undefined" || line.startsWith("\\")) {
+      continue;
+    }
+
+    if (line.startsWith("+") && !line.startsWith("+++")) {
+      lines.add(newLine++);
+    } else if (line.startsWith(" ")) {
+      lines.add(newLine++);
+    } else if (line.startsWith("-") && !line.startsWith("---")) {
+      continue;
+    }
+  }
+
+  return lines;
+}
+
+function getStepReviewLine(step: CodeTour["steps"][number]): number | undefined {
+  return step.selection?.end.line || step.line;
+}
+
+function buildReviewDraft(tour: CodeTour, files: PullRequestFile[]) {
+  const changedLinesByFile = new Map(
+    files.map(file => [file.filename, getReviewLineNumbers(file.patch)])
+  );
+
+  const comments: ReviewComment[] = [];
+  const skipped: SkippedReviewStep[] = [];
+
+  tour.steps.forEach((step, index) => {
+    const body = step.description.trim();
+    if (!body) {
+      skipped.push({
+        stepNumber: index + 1,
+        reason: "step description is empty"
+      });
+      return;
+    }
+
+    if (!step.file) {
+      skipped.push({
+        stepNumber: index + 1,
+        reason: "step is not associated with a file"
+      });
+      return;
+    }
+
+    const line = getStepReviewLine(step);
+    if (!line) {
+      skipped.push({
+        stepNumber: index + 1,
+        reason: "step does not have a line or selection"
+      });
+      return;
+    }
+
+    const changedLines = changedLinesByFile.get(step.file);
+    if (!changedLines) {
+      skipped.push({
+        stepNumber: index + 1,
+        reason: `${step.file} is not in the PR diff`
+      });
+      return;
+    }
+
+    if (!changedLines.has(line)) {
+      skipped.push({
+        stepNumber: index + 1,
+        reason: `${step.file}:${line} is not commentable in the PR diff`
+      });
+      return;
+    }
+
+    comments.push({
+      path: step.file,
+      line,
+      side: "RIGHT",
+      body
+    });
+  });
+
+  return { comments, skipped };
+}
+
+function buildReviewBody() {
+  return "Posting a self code review generated from AI automation.";
+}
+
+async function getGitHubSession() {
+  try {
+    return await vscode.authentication.getSession("github", ["repo"], {
+      createIfNone: true
+    });
+  } catch {
+    vscode.window.showErrorMessage(
+      "Sign in to GitHub before submitting a CodeTour as a PR review."
+    );
+  }
+}
+
+async function githubRequest<T>(
+  method: Method,
+  url: string,
+  token: string,
+  data?: unknown
+): Promise<T> {
+  const axios = await import("axios");
+  const response = await axios.default.request<unknown>({
+    method,
+    url,
+    data,
+    headers: {
+      Accept: "application/vnd.github+json",
+      Authorization: `Bearer ${token}`,
+      "X-GitHub-Api-Version": "2022-11-28"
+    }
+  });
+
+  return response.data as T;
+}
+
+async function getPullRequestFiles(
+  target: PullRequestTarget,
+  token: string
+): Promise<PullRequestFile[]> {
+  const files: PullRequestFile[] = [];
+  let page = 1;
+
+  while (true) {
+    const pageFiles = await githubRequest<PullRequestFile[]>(
+      "GET",
+      `https://api.github.com/repos/${target.owner}/${target.repo}/pulls/${target.pullNumber}/files?per_page=100&page=${page}`,
+      token
+    );
+
+    files.push(...pageFiles);
+
+    if (pageFiles.length < 100) {
+      return files;
+    }
+
+    page++;
+  }
+}
+
 export function registerPlayerCommands() {
   // This is a "private" command that's used exclusively
   // by the hover description for tour markers.
@@ -321,6 +708,93 @@ ${comment}`;
       const contents = await exportTour(node.tour);
       const bytes = new TextEncoder().encode(contents);
       vscode.workspace.fs.writeFile(uri, bytes);
+    }
+  );
+
+  vscode.commands.registerCommand(
+    `${EXTENSION_NAME}.submitTourAsPrReview`,
+    async (node?: CodeTourNode) => {
+      const tour = node?.tour || store.activeTour?.tour;
+      if (!tour) {
+        return vscode.window.showErrorMessage(
+          "Select or start a CodeTour before submitting it as a PR review."
+        );
+      }
+
+      const session = await getGitHubSession();
+      if (!session) {
+        return;
+      }
+
+      let target = await detectPullRequestForTour(tour, session.accessToken);
+      if (!target) {
+        const clipboard = await vscode.env.clipboard.readText();
+        const input = await vscode.window.showInputBox({
+          prompt: "Enter the target PR URL or owner/repo#number",
+          placeHolder: "https://github.com/owner/repo/pull/123",
+          value: parsePullRequestInput(clipboard) ? clipboard : ""
+        });
+        if (!input) {
+          return;
+        }
+
+        target = parsePullRequestInput(input);
+        if (!target) {
+          return vscode.window.showErrorMessage(
+            "Enter a GitHub PR as a URL or in owner/repo#number format."
+          );
+        }
+      } else {
+        vscode.window.showInformationMessage(
+          `Detected PR ${formatPullRequestTarget(target)} for the current branch.`
+        );
+      }
+
+      let files: PullRequestFile[];
+      try {
+        files = await getPullRequestFiles(target, session.accessToken);
+      } catch (e) {
+        return vscode.window.showErrorMessage(
+          `Unable to read PR #${target.pullNumber}: ${getGitHubErrorMessage(e)}`
+        );
+      }
+
+      const { comments, skipped } = buildReviewDraft(tour, files);
+      if (comments.length === 0 && skipped.length === 0) {
+        return vscode.window.showErrorMessage(
+          "This tour doesn't contain any steps to submit."
+        );
+      }
+
+      const confirmation = await vscode.window.showInformationMessage(
+        `Submit "${tour.title}" as a review on ${target.owner}/${target.repo}#${target.pullNumber}? ${comments.length} inline comment(s), ${skipped.length} skipped step(s).`,
+        { modal: true },
+        "Submit Review"
+      );
+      if (confirmation !== "Submit Review") {
+        return;
+      }
+
+      try {
+        await githubRequest(
+          "POST",
+          `https://api.github.com/repos/${target.owner}/${target.repo}/pulls/${target.pullNumber}/reviews`,
+          session.accessToken,
+          {
+            event: "COMMENT",
+            body: buildReviewBody(),
+            comments
+          }
+        );
+
+        vscode.window.showInformationMessage(
+          `Submitted CodeTour review to ${target.owner}/${target.repo}#${target.pullNumber}.`
+        );
+      } catch (e) {
+        vscode.window.showErrorMessage(
+          `Unable to submit PR review: ${getGitHubErrorMessage(e)}`
+        );
+      }
     }
   );
 

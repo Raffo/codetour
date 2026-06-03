@@ -214,6 +214,12 @@
         "icon": "$(comment-discussion)"
       },
       {
+        "command": "codetour.submitTourAsPrReview",
+        "title": "Submit Tour as PR Review",
+        "category": "CodeTour",
+        "icon": "$(github)"
+      },
+      {
         "command": "codetour.showMarkers",
         "title": "Show Tour Markers",
         "category": "CodeTour",
@@ -275,6 +281,10 @@
         },
         {
           "command": "codetour.sendStepCommentToCopilot",
+          "when": "false"
+        },
+        {
+          "command": "codetour.submitTourAsPrReview",
           "when": "false"
         },
         {
@@ -537,6 +547,11 @@
           "command": "codetour.exportTour",
           "when": "viewItem =~ /^codetour.tour(.primary)?(.active)?$/",
           "group": "export@1"
+        },
+        {
+          "command": "codetour.submitTourAsPrReview",
+          "when": "viewItem =~ /^codetour.tour(.primary)?(.active)?$/",
+          "group": "export@2"
         },
         {
           "command": "codetour.moveTourStepBack",

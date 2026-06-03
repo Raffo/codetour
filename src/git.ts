@@ -19,9 +19,17 @@ export interface Ref {
 export interface RepositoryState {
   readonly HEAD: Ref | undefined;
   readonly refs: Ref[];
+  readonly remotes: Remote[];
+}
+
+export interface Remote {
+  readonly name: string;
+  readonly fetchUrl?: string;
+  readonly pushUrl?: string;
 }
 
 export interface Repository {
+  readonly rootUri: vscode.Uri;
   readonly state: RepositoryState;
 }
 
